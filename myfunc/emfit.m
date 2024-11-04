@@ -1,9 +1,14 @@
-function [m,s,p_k,m_all,s_all,pk_all] = emfit(O,m0,s0,p_k0,maxiter,tol)
+function gm = emfit(O,m0,s0,p_k0,varargin)
 % d dimention, n_set cluster, n_data data points
 % m0: initial mean, size = [d,n_set]
 % s0: initial sigma, size = [d,d,n_set]
 % p_k0: initial mixing coefficients, size = [1,n_set]
 % 
+% Optional Input:
+% tol: stop criteria, average(4) change of avg log likelihood
+% dispinfo: show figure and print
+% alldata: all data for each iteration
+%
 % You Can Use ChatGPT or Goole Translate to Understand the Chinese Commend.
 % 
 % 后续代码注释以红蓝两个符合高斯分布的事件为例，比如红蓝两把枪射击100次，但这个代码不仅限于分2类。
@@ -26,6 +31,19 @@ function [m,s,p_k,m_all,s_all,pk_all] = emfit(O,m0,s0,p_k0,maxiter,tol)
 % v1.3 | 10-18-2024 | if each element in cov is close to zero, delete this gauss
 % v1.4 | 10-19-2024 | add another check, if many points are at same location and far away 
 % from other data, do not delete this gauss
+% v1.5 | 10-24-2024 | change stop criteria to change of avg log likelihood,
+% plot , add save all iter data option
+%%
+p = inputParser;
+addParameter(p,'maxiter',300)
+addParameter(p,'tol',1e-5)
+addParameter(p,'dispinfo',true);
+addParameter(p,'alldata',false);
+parse(p,varargin{:});
+maxiter = p.Results.maxiter;
+tol = p.Results.tol;
+dispinfo = p.Results.dispinfo;
+alldata = p.Results.alldata;
 
 %% Size
 
@@ -41,20 +59,31 @@ p_k = reshape(p_k0,1,1,[]);
 m = reshape(m0,d,1,[]);
 s = s0;
 
-% for check break loop
-m_pre = m;
-s_pre = s0;
-p_k_pre = p_k;
 count = maxiter;
 
 %% record all data
-m_all = NaN(d,maxiter+1,n_set);
-s_all = NaN(d,d,n_set,maxiter+1);
-pk_all = NaN(1,maxiter+1,n_set);
 
-m_all(:,1,:) = m;
-s_all(:,:,:,1) = s;
-pk_all(:,1,:) = p_k;
+if alldata
+    m_all = NaN(d,maxiter+1,n_set);
+    s_all = NaN(d,d,n_set,maxiter+1);
+    pk_all = NaN(1,maxiter+1,n_set);
+
+    m_all(:,1,:) = m;
+    s_all(:,:,:,1) = s;
+    pk_all(:,1,:) = p_k;
+end
+
+log_likelihood = NaN(1,maxiter+1);
+
+%%
+
+if dispinfo
+    f = figure;
+    pp = plot(nan,'.-','LineWidth',1);
+    grid on; xlim([1,inf])
+    title('avg log likelihood')
+    set(f,'Units','normalized','Position',[0.2,0.2,0.6,0.6])
+end
 
 %%
 
@@ -69,13 +98,14 @@ for i = 1:maxiter
 
     % 比如观测到的值是10，分别计算红色或者蓝色得到10的概率。
     % 因为这两个概率之和是1，所以要除以sum(p_k_x,3)。
-    c = sum(p_k_x,3);
-    p_k_x = p_k_x./c; 
-
+    p_x = sum(p_k_x,3);
+    likelihood = mean(log(p_x)); % avg log likelihood
+    p_k_x = p_k_x./p_x; 
+    
 
     % 但是由于这个点太远了，红色和蓝色的高斯分布曲线算出来的结果都很接近于0，计算机认为就是0。
     % 除以0会变成nan，因此重新调整概率，认为红蓝概率相等，0.5，0.5
-    ind = c==0;    
+    ind = p_x==0;    
     p_k_x(:,ind,:) = 1/n_set;
 
     %% M-step: Update parameters
@@ -121,24 +151,39 @@ for i = 1:maxiter
 
     %% record all data
 
-    m_all(:,i+1,ind_keep) = m;
-    s_all(:,:,ind_keep,i+1) = s;
-    pk_all(:,i+1,ind_keep) = p_k;
+    if alldata
+        m_all(:,i+1,ind_keep) = m;
+        s_all(:,:,ind_keep,i+1) = s;
+        pk_all(:,i+1,ind_keep) = p_k;
+    end
+    log_likelihood(i) = likelihood;
 
-    %% if mean / var not change, break loop
-    % 如果3个参数都不再变化，跳出循环
+    %% if log-likelihood not change, break loop
+    % log-likelihood不再变化，跳出循环
 
-    c1 = all(sqrt(sum((m-m_pre(:,:,~ind_r)).^2,1))<tol(1));
-    c2 = all(sqrt(sum((s-s_pre(:,:,~ind_r)).^2,[1,2]))<tol(2));
-    c3 = all(abs(p_k-p_k_pre(:,:,~ind_r))<tol(3));
-    if c1 && c2 && c3
+    if i>=5
+        d_likelihood = abs(mean(diff(log_likelihood(i-4:i))));
+        %d_likelihood = likelihood_pre-likelihood;
+        c0 = abs(d_likelihood)<tol;
+    else
+        d_likelihood = NaN;
+        c0 = false;
+    end
+    
+    if (mod(i,10)==0 || i==maxiter || c0) && dispinfo
+        fprintf('iter: %3.0f ~%3.0f | change = %11.3e\n',max(i-4,1),i,d_likelihood)
+
+    end
+    if dispinfo
+        pp.YData = log_likelihood(1:i);
+        pp.XData = 1:i;
+        drawnow; 
+    end
+
+    if c0
         count = i;
         break
     end
-
-    m_pre = m;
-    s_pre = s;
-    p_k_pre = p_k;
 end
 
 %% squeeze final output
@@ -147,9 +192,21 @@ m = squeeze(m);
 p_k = squeeze(p_k);
 
 %% record all parameter for plotting
+if alldata
+    m_all = m_all(:,1:count+1,:);
+    s_all = s_all(:,:,:,1:count+1);
+    pk_all = pk_all(:,1:count+1,:);
+end
+log_likelihood = log_likelihood(1:count+1);
 
-m_all = m_all(:,1:count+1,:);
-s_all = s_all(:,:,:,1:count+1);
-pk_all = pk_all(:,1:count+1,:);
-
+%%
+gm.m = m;
+gm.s = s;
+gm.p_k = p_k;
+gm.log_likelihood = log_likelihood;
+if alldata
+    gm.m_all = m_all;
+    gm.s_all = s_all;
+    gm.pk_all = pk_all;
+end
 end
